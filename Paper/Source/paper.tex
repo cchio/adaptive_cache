@@ -1,0 +1,67 @@
+\documentclass[11pt]{article}
+\usepackage{cite}
+
+\begin{document}
+
+\title{SSD-HDD Hybrid Drive Caching Solution}
+\author{Nobody Jr.}
+\date{Today}
+\maketitle
+
+1. Introduction
+
+SanDisk solid state drives perform reads and writes with the low latency when the write block size is small. However, a recently released popular consumer caching software requires the system to cache hot data in large blocks, resulting in low performance when used with SanDisk hardware. This paper documents the process and results of developing a caching algorithm that matches up to the performance of industry standard comsumer caching solutions, and the devising of a compatible page-level management framework that fully takes advantage of the low read/write latency that SanDisk SSDs are capable of.
+
+1.1 Background
+
+Adaptive caching algorithms have been developed for decades, and one of the only reasons why a filesystem level caching solution might not take advantage of adaptive caching might be because of the bulkiness of and relative complexity in comparison to more traditional approaches, such as the Least Recently Used and Most Frequently Used caching methods. 
+
+The page management layer acts as a virtualization layer between the physical reads/writes on the disks and the filesystem, aiming to create a low-latency and low-cost alternative to full SSD machines. Differentiation of reads and writes would not be visible to the client, and the goal would be to best mimic the performance of a full SSD optimized for most common workflow characteristics.
+
+In this paper, we will discuss the design decisions made in the implementation and design of the caching and page management algorithms, as well as providing justification for the various optimization processes carried out in improving the algorithm.
+
+2. Short-Sighted Adaptive Replacement Caching
+
+Throughout the course of the project, the Short-Sighted Adaptive Replacement Cache (SSARC) was developed and implemented as a layer to best mimic the performance of Intel's SRC technology. The implementation decided upon made use of three queues - the Recency Queue, Frequency Queue, and Ghost Queue. Of the three queues, only elements stored in the Frequency and Ghost Queues would be physically stored within cache. The Ghost Queue exists as a backlog of nodes that have been evicted from the former two queues. The Frequency and Recency Queues have a dynamically sized "tail", which exists to preemptively adjust the size of each of those queues based on the workload history. Each node in the queues have an "emergency" attribute, which indicates the propensity in which the element is going to be evicted from the queue, and is used in the page replacement algorithm. Each of the tails in the list have an "utility" attribute, which is used to adjust the size of each of the queue's tail segments. There are several volatile-state variables and parameters that can be optimized for performance.  More on the SSARC can be found in several well established papers.
+
+Each of the nodes stored in the queues is a struct defined with the following fields:
+	unsigned int process_number
+	unsigned int HDD_address
+	char queue_written_to
+	unsigned char num_times_rewritten
+The HDD_address is aligned to the PAGE_SIZE of the media, and several attributes are stored in the least significant bits of the field. These include an indication of whether the element was twice accessed, or if it is marked as a "dated" element, which alters the algorithm's behavior when either being evicted from the queue or when it is accessed while in the tail segments.
+
+3. Page Management Module
+
+Parallel to the caching module (where the SSARC algorithm and the queue data structures exist) is the page management module. The page management module exists as a platform for the HDD_address identifier of each node in the queues to be matched to the logical block address (LBA) of that cached element in the SSD. This implement is designed for a write-through caching solution, that has each cached data block existing in both the SSD and HDD. This would cause a slight decrease in performance in writes (having to write to both the SSD and HDD when caching a particular data block), but will result in improvements in read latency when the data block read is in cache. The developer can choose to go with a write-through implementation as well, which means that each data block only exists in either the SSD or HDD. Cached data is removed from the HDD and written to the SSD, and when evicted from the queues, the data block would be erased from the SSD and be written to the HDD. The various advantages and disadvantages for each of these mechanisms is well documented in literature.
+
+3.1 Page Mapping Algorithm
+
+The Page Mapping Hashtable maintains three attributes. The key of the hashtable would be the HDD_address, and the values would be both the SSD_address and a pointer to the element in the queue. Note that this hashtable also keeps track of elements that exist in the ghost queues (i.e. not currently in cache). For these elements, the entry in the hashtable only exists to facilitate easy re-entry to the cache, since elements in the ghost queues have a relatively high propensity of re-entering the cache. The decision to maintain a SSD_address = 0 and queue_ptr = NULL for these ghost queue elements is motivated by the consideration that the overhead for keeping these entries in the hashtable is not exorbitant, but the complexity and complications involved in doing a complete removal at every eviction from the cache are significant.
+
+3.2 Adaptive Allocation of Cached Data
+
+The Block Write Management Algorithm is also situated within the page management module of the system. This submodule manages the write blocks to the SSD, and determines where in SSD the cached data is written to. This is where the most bold and untested design decisions of the project is made. When a data block is newly cached from the HDD, it will be written to buffer space in SRAM. This buffer space contains two separate buffers. The first buffer would be for not-frequently-written data, and the second buffer would be for frequently-written-data. The former would be smaller than the latter, though the exact sizes for each of these buffers should either be optimized for performance or dynamically adjusted based on workload history. The rationale for having these write block buffers is so we can optimize for the lowest latency in writes to the SSD. Since we can attain the most efficient write times to the SSD with write-blocks in the 2 to 4 kilobyte range, we will buffer data blocks in memory till the buffer is full, then perform a write-to-SSD operation. 
+
+Whether a data-block is classified as frequently-written or not will be determined by the field in each struct node stored in the cache queues, "num_times_rewritten". When the data-block has been rewritten more than a certain amount of times, it will qualify for storage into the frequently-written-data section of the SSD. 
+
+3.3 Internal Sub-Partitioning of SSD-space
+
+The SSD data space is partitioned into two separate regions. When the not-frequently-written data buffer is full, the buffered data would be written to the not-frequently-written data region of flash memory. The analagous case would be true for the frequently-written data buffer. The reason for having such a partition is because we will be selecting different write-block sizes for the not-frequently-written data and the frequently-written-data partitions. When a data-block is invalidated (i.e. evicted from the queue, or if the data is updated) it will simply be invalidated from the write-block-metadata stored in the first datablock of each write-block. When the write-block is fully invalidated, then it will be marked as empty, and new write-blocks can then overwrite it with fresh data. 
+
+3.4 Accounting for Fragmentation
+
+Because of a potential for internal fragmentation within the write-blocks, we must optimize the algorithm for sizes of the write-blocks. Frequently-written data will have more frequent block-invalidation, and thus, the expected time that a block will exist in a partially-invalidated state will be predicatbly lower than for the not-frequently-written data partition. Hence, we perform some compensation for this problem by having smaller write-blocks for the not-frequently-written data sector. Hence, fewer blocks will have to be invalidated for a write-block to be marked as completely invalidated and available for overwrite. The ratio of write-block sizes for each of these partitions would have to be further researched upon. It would be possible to adopt a dynamic implementation as well. The ratio of flash memory space that is spent on frequently-writen-data to not-frequently-written-data should be implemented dynamically, with the partition marker being adjusted according to workload characteristic analytics. This allows for adjustment of the algorithm to accomplish the best fit to the target work load and not cause any SSD data fragmentation issues that would be exponentially detrimental to the caching algorithm's performance.
+
+An alternative method for storing each write-block's metadata would be to use a block-mapping directory that the respective number of valid pages in each of the blocks sorted by write-block number in the relevant portion in flash memory.
+
+Garbage management should be called at relevant points of the system's workload to consolidate and coagulate valid data blocks into full write-blocks, and to minimize any internal fragmentation which would inevitably build up over time. This garbage collection should be called at regular points of the workload for performance leveling, but in extreme cases of unusually high fragmentation, we should also perform emergency garbage collection. To detect cases like these, we should maintain a ratio of number of write-blocks with fewer than half of their data blocks valid, to the the number of write-blocks with more than half of their data blocks valid. By constantly checking for the maintenance of a healthy ratio, we can ensure that the system will never run into a situation of extreme fragmentation.
+
+4. Future Steps
+
+Further optimization of the various paramters and implementation design choices must be made, but based on initial tests, the design for the SSARC as a caching algorithm base and the page management layer as a framework for dispatching data to flash memory have shown promising results.
+
+
+\bibliography{references}{}
+\bibliographystyle{plain}
+\end{document}

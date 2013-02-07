@@ -1,0 +1,38 @@
+1) receive read request for hard disk address 0x12345, size 128kb
+
+2) break into PAGE_SIZE individual nodes
+
+3) search management table for the existence of each individual node
+
+4a.1) if node exists in management table and has a non-zero SSD address, it means that it is in the recency queue or frequency queue --> return SSD address
+
+4a.2) update queue, refresh node's position in queue (+queue update misc.)
+
+4b.1) if node is found in management table and has an SSD address of zero, it means that it is in the ghost queue --> return HDD address
+
+4b.2) put node to the head of the frequency queue (+queue update misc.)
+
+4c.1) if node is not found in the management table, it means it is not in any queue, and not in the cache
+
+4b.2) add node to the recency queue of the cache (+cache update misc.) //WHEN TO CHECK IF QUEUES ARE FULL OR NOT? THEN WE NEED TO CALL REPLACE()
+
+4b.3) check if SSD-write buffer is one node away from being full
+
+4b.3a.1) if yes, write node to SSD-write buffer, then write whole block to SSD
+
+4b.31.2) update new SSD addresses in the page management table for all the blocks in this batch of the SSD-write buffer
+
+4b.3b.1) if no, write node to SSD-write buffer
+
+4b.3b.2) update page management table with pointer to the SRAM address
+
+
+1) receive write request for hard disk address 0x54321, size 128kb
+
+2) break into PAGE_SIZE individual nodes
+
+3) search management table for existence of each individual node
+
+4a.1) if node exists in queue, mark node as invalid in management table
+
+4a.2) 
